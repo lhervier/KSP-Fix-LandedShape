@@ -23,6 +23,10 @@ namespace com.github.lhervier.ksp.fix.landedshape
     /// saved position is not trusted, and the vessel is put back onto the ground as stock does when the terrain detail
     /// has changed. Where no terrain collider can be found under it, the vessel gets the stock raise.
     ///
+    /// A vessel that never left the ground since its launch (PRELAUNCH) is treated the same once it has been launched:
+    /// stock puts it back onto the ground by its straight, packed shape at every load and warp exit, which raises a
+    /// vessel bent under its weight and lets it fall.
+    ///
     /// Vessels holding a ground part (a stock ground anchor, deployed science) skip that guard: riveted to the ground,
     /// with their origin at or below it, they are left where they were saved.
     /// </summary>
@@ -65,12 +69,36 @@ namespace com.github.lhervier.ksp.fix.landedshape
             return vessel != null && !vessel.Splashed && vessel.mainBody != null && vessel.mainBody.pqsController != null;
         }
 
-        // Whether Vessel.GoOffRails will leave the landed vessel where it is, as computed there: the terrain detail
-        // saved with the vessel matches the current one, except on the launch pad, and the vessel is not a single
-        // part, unless a part dropped in EVA construction. A spawning vessel goes through CheckGroundCollision, which
-        // also does nothing then.
+        // A vessel that never left the ground since it was launched stays PRELAUNCH, through saves and loads. Stock
+        // never lets one skip its ground positioning: at every load and every warp exit, Vessel.GoOffRails puts it
+        // back onto the ground by the lowest point of its parts (Vessel.CheckGroundCollision), measured on its packed
+        // shape, the straight one it was built with. A vessel resting on its own parts, its shape bent under its
+        // weight, is then raised by the difference (25 cm for a 615 t base), and falls it as soon as it is unpacked.
+        // Here, a PRELAUNCH vessel that is not being launched gets the flag stock computes for any other landed
+        // vessel: left where it is when its saved terrain detail matches the current one, the guard of the
+        // GoOffRails patch then checking it against the ground. A vessel being launched (spawning) keeps the stock
+        // ground positioning.
+        private static void LetPrelaunchSkipGroundPositioning(Vessel vessel)
+        {
+            if (vessel.situation != Vessel.Situations.PRELAUNCH || vessel.vesselSpawning
+                || vessel.PQSminLevel == 0 || vessel.PQSmaxLevel == 0)
+            {
+                return;
+            }
+            PQS pqs = vessel.mainBody.pqsController;
+            vessel.skipGroundPositioning = vessel.PQSminLevel == pqs.minLevel && vessel.PQSmaxLevel == pqs.maxLevel;
+        }
+
+        // Whether Vessel.GoOffRails will leave the landed vessel where it is, as computed there: not a spawning
+        // vessel, the terrain detail saved with the vessel matches the current one, except on the launch pad (made
+        // the same by LetPrelaunchSkipGroundPositioning), and the vessel is not a single part, unless a part dropped in
+        // EVA construction.
         private static bool StockSkipsGroundPositioning(Vessel vessel)
         {
+            if (vessel.vesselSpawning)
+            {
+                return false;
+            }
             bool skip = vessel.skipGroundPositioning;
             PQS pqs = vessel.mainBody.pqsController;
             if (vessel.PQSminLevel != 0 && vessel.PQSmaxLevel != 0 && vessel.situation != Vessel.Situations.PRELAUNCH)
@@ -153,8 +181,12 @@ namespace com.github.lhervier.ksp.fix.landedshape
             private static void Prefix(Vessel __instance)
             {
                 Vessel vessel = __instance;
-                if (!vessel.packed || !vessel.loaded || !vessel.Landed || !Handles(vessel)
-                    || !StockSkipsGroundPositioning(vessel))
+                if (!vessel.packed || !vessel.loaded || !vessel.Landed || !Handles(vessel))
+                {
+                    return;
+                }
+                LetPrelaunchSkipGroundPositioning(vessel);
+                if (!StockSkipsGroundPositioning(vessel))
                 {
                     return;
                 }
