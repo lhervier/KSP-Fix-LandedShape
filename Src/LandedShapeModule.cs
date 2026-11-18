@@ -43,6 +43,11 @@ namespace com.github.lhervier.ksp.fix.landedshape
     /// would bounce when its weight comes back: that easing is skipped (<see cref="NoEasingAfterShape"/>). The wheel
     /// suspensions get back the spring and damper they pushed with (<see cref="SuspensionState"/>), and the vessel is
     /// held still until its wheels have found the ground (<see cref="Hold"/>).
+    ///
+    /// The velocities saved are those of the motion the game shows, measured from the poses of the last physics steps
+    /// (<see cref="SampleMotion"/>), not Rigidbody.velocity: PhysX moves a body with the velocity it has after its
+    /// position iterations, then keeps the one it gets after its velocity iterations, which never converges on a light
+    /// part held in a stiff chain of heavy ones (a 20 kg docking port reads 0.3 m/s while it does not move).
     /// </summary>
     public class LandedShapeModule : VesselModule
     {
@@ -92,6 +97,30 @@ namespace com.github.lhervier.ksp.fix.landedshape
         private Vector3 movingRootVelocity;
         private Vector3 movingRootAngularVelocity;
 
+        // How many physics steps a velocity is measured over. Positions are floats: over a single step, a vessel 2 km
+        // from the floating origin would read up to 12 mm/s of rounding; over 5 steps (0.1 s), 2.4 mm/s, still far
+        // shorter than a load swinging.
+        private const int MotionSteps = 5;
+        private const int MotionSlots = MotionSteps + 1;
+
+        /// <summary>The poses of one body at the last physics steps, in a ring indexed like <see cref="sampleTimes"/>.</summary>
+        private sealed class BodyTrack
+        {
+            public Rigidbody Body;
+            public readonly Vector3[] Positions = new Vector3[MotionSlots];
+            public readonly Quaternion[] Rotations = new Quaternion[MotionSlots];
+        }
+
+        /// <summary>The bodies whose motion is sampled, by body; null when the vessel is not sampled.</summary>
+        private Dictionary<Rigidbody, BodyTrack> tracks;
+
+        /// <summary>The part count of the vessel when <see cref="tracks"/> was built.</summary>
+        private int trackedParts;
+
+        private readonly float[] sampleTimes = new float[MotionSlots];
+        private int sampleCount;
+        private int newestSample;
+
         /// <summary>
         /// Whether the shape has just been put back, within <see cref="EasingWindow"/>; forgets it, so that only the
         /// easing that follows the unpack is skipped.
@@ -108,12 +137,30 @@ namespace com.github.lhervier.ksp.fix.landedshape
             if (Settings.KeepLandedShape)
             {
                 GameEvents.onVesselGoOffRails.Add(OnVesselGoOffRails);
+                GameEvents.onFloatingOriginShift.Add(OnFloatingOriginShift);
+                GameEvents.onVesselWasModified.Add(OnVesselWasModified);
             }
         }
 
         private void OnDestroy()
         {
             GameEvents.onVesselGoOffRails.Remove(OnVesselGoOffRails);
+            GameEvents.onFloatingOriginShift.Remove(OnFloatingOriginShift);
+            GameEvents.onVesselWasModified.Remove(OnVesselWasModified);
+        }
+
+        // A shift moves every body between two samples: their motion is measured again from there.
+        private void OnFloatingOriginShift(Vector3d offset, Vector3d nonKrakensbane)
+        {
+            ForgetMotion();
+        }
+
+        private void OnVesselWasModified(Vessel v)
+        {
+            if (v == vessel)
+            {
+                ForgetMotion();
+            }
         }
 
         protected override void OnLoad(ConfigNode node)
@@ -142,7 +189,17 @@ namespace com.github.lhervier.ksp.fix.landedshape
             Vector3 rootAngularVelocity = pendingRootAngularVelocity;
             if (vessel != null && vessel.loaded && !vessel.packed)
             {
-                shape = vessel.Landed ? Capture(out rootVelocity, out rootAngularVelocity) : null;
+                if (held != null && moving != null)
+                {
+                    // Held still since it was put back: the shape and velocities are still the ones loaded.
+                    shape = moving;
+                    rootVelocity = movingRootVelocity;
+                    rootAngularVelocity = movingRootAngularVelocity;
+                }
+                else
+                {
+                    shape = vessel.Landed ? Capture(out rootVelocity, out rootAngularVelocity) : null;
+                }
             }
             if (shape == null)
             {
@@ -155,6 +212,8 @@ namespace com.github.lhervier.ksp.fix.landedshape
 
         public override void OnGoOnRails()
         {
+            bool stillHeld = held != null && moving != null;
+            Dictionary<uint, PartPose> loaded = moving;
             pendingWheels = null;
             held = null;
             heldWheels = null;
@@ -162,9 +221,21 @@ namespace com.github.lhervier.ksp.fix.landedshape
             // Called by Vessel.GoOnRails before the parts are packed: they are still where the physics left them.
             if (!Settings.KeepLandedShape || vessel == null || !vessel.loaded || vessel.packed)
             {
+                ForgetMotion();
                 return;
             }
-            pending = vessel.Landed ? Capture(out pendingRootVelocity, out pendingRootAngularVelocity) : null;
+            if (stillHeld)
+            {
+                // Held still since it was put back: the shape and velocities are still the ones loaded.
+                pending = loaded;
+                pendingRootVelocity = movingRootVelocity;
+                pendingRootAngularVelocity = movingRootAngularVelocity;
+            }
+            else
+            {
+                pending = vessel.Landed ? Capture(out pendingRootVelocity, out pendingRootAngularVelocity) : null;
+            }
+            ForgetMotion();
             if (pending != null)
             {
                 Log.Debug($"{Name()}: going on rails, shape of {pending.Count} part(s) kept");
@@ -196,8 +267,18 @@ namespace com.github.lhervier.ksp.fix.landedshape
             Part rootPart = vessel.rootPart;
             Transform root = rootPart.transform;
             Quaternion toRoot = Quaternion.Inverse(root.rotation);
-            rootVelocity = rootPart.rb != null ? toRoot * rootPart.rb.velocity : Vector3.zero;
-            rootAngularVelocity = rootPart.rb != null ? toRoot * rootPart.rb.angularVelocity : Vector3.zero;
+            VelocityReport report = new VelocityReport();
+            Vector3 v, w;
+            if (rootPart.rb != null)
+            {
+                VelocityOf(rootPart.rb, rootPart, ref report, out v, out w);
+            }
+            else
+            {
+                v = w = Vector3.zero;
+            }
+            rootVelocity = toRoot * v;
+            rootAngularVelocity = toRoot * w;
             Dictionary<uint, PartPose> shape = new Dictionary<uint, PartPose>();
             foreach (Part part in vessel.parts)
             {
@@ -205,20 +286,22 @@ namespace com.github.lhervier.ksp.fix.landedshape
                 {
                     continue;
                 }
+                VelocityOf(part.rb, part, ref report, out v, out w);
                 PartPose pose = new PartPose
                 {
                     Position = toRoot * (part.transform.position - root.position),
                     Rotation = toRoot * part.transform.rotation,
-                    Velocity = toRoot * part.rb.velocity,
-                    AngularVelocity = toRoot * part.rb.angularVelocity
+                    Velocity = toRoot * v,
+                    AngularVelocity = toRoot * w
                 };
                 if (part.servoRb != null)
                 {
+                    VelocityOf(part.servoRb, part, ref report, out v, out w);
                     pose.HasServo = true;
                     pose.ServoPosition = toRoot * (part.servoRb.transform.position - root.position);
                     pose.ServoRotation = toRoot * part.servoRb.transform.rotation;
-                    pose.ServoVelocity = toRoot * part.servoRb.velocity;
-                    pose.ServoAngularVelocity = toRoot * part.servoRb.angularVelocity;
+                    pose.ServoVelocity = toRoot * v;
+                    pose.ServoAngularVelocity = toRoot * w;
                 }
                 pose.HasWheel = SuspensionState.TryCapture(part, out pose.Wheel);
                 bool moved = (pose.Position - part.orgPos).magnitude >= MinOffset ||
@@ -229,7 +312,143 @@ namespace com.github.lhervier.ksp.fix.landedshape
                     shape[part.persistentId] = pose;
                 }
             }
+            Log.Debug($"{Name()}: velocities of {report.Measured} body(ies) measured from their motion over " +
+                $"{report.Steps} step(s), {report.Read} read from PhysX; largest gap with the PhysX velocity " +
+                $"{report.LargestGap * 1000f:0.0} mm/s on {report.LargestGapPart ?? "-"}");
             return shape;
+        }
+
+        /// <summary>How the velocities of a capture were obtained, for the log.</summary>
+        private struct VelocityReport
+        {
+            public int Measured;
+            public int Read;
+            public int Steps;
+            public float LargestGap;
+            public string LargestGapPart;
+        }
+
+        /// <summary>
+        /// The world velocity and angular velocity of <paramref name="body"/> (of <paramref name="part"/>): measured
+        /// from its motion over the last physics steps, or its PhysX velocity when it has not been sampled long enough.
+        /// </summary>
+        private void VelocityOf(Rigidbody body, Part part, ref VelocityReport report, out Vector3 velocity,
+            out Vector3 angularVelocity)
+        {
+            int steps;
+            if (!TryMeasureMotion(body, out velocity, out angularVelocity, out steps))
+            {
+                velocity = body.velocity;
+                angularVelocity = body.angularVelocity;
+                report.Read++;
+                return;
+            }
+            report.Measured++;
+            report.Steps = steps;
+            float gap = (velocity - body.velocity).magnitude;
+            if (gap > report.LargestGap || report.LargestGapPart == null)
+            {
+                report.LargestGap = gap;
+                report.LargestGapPart = $"{part.partInfo.name} ({part.persistentId}){(body == part.servoRb ? " servo" : "")}";
+            }
+        }
+
+        /// <summary>Forgets the sampled motion: it is measured again from the next physics step.</summary>
+        private void ForgetMotion()
+        {
+            tracks = null;
+            sampleCount = 0;
+        }
+
+        /// <summary>
+        /// Records the pose of each physical body of the vessel, at each physics step, while it is loaded, unpacked,
+        /// landed and not held; forgets them otherwise.
+        /// </summary>
+        private void SampleMotion()
+        {
+            if (!Settings.KeepLandedShape || vessel == null || !vessel.loaded || vessel.packed || !vessel.Landed ||
+                held != null)
+            {
+                if (tracks != null)
+                {
+                    ForgetMotion();
+                }
+                return;
+            }
+            if (tracks == null || trackedParts != vessel.parts.Count)
+            {
+                tracks = new Dictionary<Rigidbody, BodyTrack>();
+                foreach (Part p in vessel.parts)
+                {
+                    if (p.rb != null && p.physicalSignificance == Part.PhysicalSignificance.FULL)
+                    {
+                        tracks[p.rb] = new BodyTrack { Body = p.rb };
+                    }
+                    if (p.servoRb != null)
+                    {
+                        tracks[p.servoRb] = new BodyTrack { Body = p.servoRb };
+                    }
+                }
+                trackedParts = vessel.parts.Count;
+                sampleCount = 0;
+                newestSample = MotionSlots - 1;
+            }
+            int slot = (newestSample + 1) % MotionSlots;
+            foreach (BodyTrack track in tracks.Values)
+            {
+                if (track.Body == null)
+                {
+                    // A body destroyed without the vessel being reported modified.
+                    ForgetMotion();
+                    return;
+                }
+                track.Positions[slot] = track.Body.position;
+                track.Rotations[slot] = track.Body.rotation;
+            }
+            sampleTimes[slot] = Time.fixedTime;
+            newestSample = slot;
+            sampleCount = Mathf.Min(sampleCount + 1, MotionSlots);
+        }
+
+        /// <summary>
+        /// The world velocity and angular velocity of <paramref name="body"/> between its oldest and newest sampled
+        /// poses, over <paramref name="steps"/> physics steps; false when it has not been sampled at two steps.
+        /// </summary>
+        private bool TryMeasureMotion(Rigidbody body, out Vector3 velocity, out Vector3 angularVelocity, out int steps)
+        {
+            velocity = angularVelocity = Vector3.zero;
+            steps = sampleCount - 1;
+            BodyTrack track;
+            if (tracks == null || steps < 1 || !tracks.TryGetValue(body, out track))
+            {
+                return false;
+            }
+            int oldest = (newestSample - steps + MotionSlots) % MotionSlots;
+            float dt = sampleTimes[newestSample] - sampleTimes[oldest];
+            if (dt <= 0f)
+            {
+                return false;
+            }
+            velocity = (track.Positions[newestSample] - track.Positions[oldest]) / dt;
+            Quaternion turn = track.Rotations[newestSample] * Quaternion.Inverse(track.Rotations[oldest]);
+            angularVelocity = RotationVector(turn) / dt;
+            return true;
+        }
+
+        /// <summary>The rotation <paramref name="q"/> as a vector: its axis times its angle in radians, the short way.</summary>
+        private static Vector3 RotationVector(Quaternion q)
+        {
+            if (q.w < 0f)
+            {
+                q = new Quaternion(-q.x, -q.y, -q.z, -q.w);
+            }
+            Vector3 axis = new Vector3(q.x, q.y, q.z);
+            float sin = axis.magnitude;
+            if (sin < 1e-7f)
+            {
+                return 2f * axis;
+            }
+            return axis * (2f * Mathf.Atan2(sin, q.w) / sin);
         }
 
         /// <summary>
@@ -238,6 +457,7 @@ namespace com.github.lhervier.ksp.fix.landedshape
         /// </summary>
         private void Restore(Dictionary<uint, PartPose> shape)
         {
+            ForgetMotion();
             Transform root = vessel.rootPart.transform;
             Vector3 rootPosition = root.position;
             Quaternion rootRotation = root.rotation;
@@ -372,11 +592,13 @@ namespace com.github.lhervier.ksp.fix.landedshape
         }
 
         /// <summary>
-        /// Lets the held vessel go, with its saved velocities, once every wheel that touched the ground touches it
-        /// again, or after <see cref="MaxHoldSteps"/>.
+        /// Samples the motion of the vessel (<see cref="SampleMotion"/>); lets the held vessel go, with its saved
+        /// velocities, once every wheel that touched the ground touches it again, or after <see cref="MaxHoldSteps"/>.
         /// </summary>
         private void FixedUpdate()
         {
+            // Before letting go: the step that lets go is sampled from the next one on.
+            SampleMotion();
             if (held == null)
             {
                 return;
