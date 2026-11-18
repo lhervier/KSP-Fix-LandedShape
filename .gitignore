@@ -1,0 +1,4 @@
+obj/
+GameData/KSPFixLandedShape/*.dll
+GameData/*.zip
+__pycache__/
