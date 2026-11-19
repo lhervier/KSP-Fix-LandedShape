@@ -132,6 +132,25 @@ namespace com.github.lhervier.ksp.fix.landedshape
             return just;
         }
 
+        /// <summary>
+        /// Forgets the shape, velocities and suspension states waiting to be put back at the next unpack, so that the
+        /// vessel leaves the rails as it does without the mod. Called when something moves the packed vessel onto the
+        /// ground by its construction shape: the saved shape no longer matches where the vessel stands, and putting it
+        /// back would leave the vessel in the air or in the ground. <paramref name="why"/> says what moved it, for the
+        /// log.
+        /// </summary>
+        internal void ForgetShape(string why)
+        {
+            if (pending == null)
+            {
+                return;
+            }
+            pending = null;
+            pendingRootVelocity = Vector3.zero;
+            pendingRootAngularVelocity = Vector3.zero;
+            Log.Info($"{Name()}: {why}, its saved shape is dropped");
+        }
+
         protected override void OnStart()
         {
             if (Settings.KeepLandedShape)

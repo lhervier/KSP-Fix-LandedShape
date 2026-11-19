@@ -211,6 +211,11 @@ namespace com.github.lhervier.ksp.fix.landedshape
                     if (gap > 0.0)
                     {
                         Raise(vessel, gap);
+                        LandedShapeModule module = vessel.GetComponent<LandedShapeModule>();
+                        if (module != null)
+                        {
+                            module.ForgetShape("raised onto the computed terrain height as it leaves the rails");
+                        }
                     }
                     Log.Info($"Landed load fix: no ground found under '{vessel.GetDisplayName()}' as it goes off rails,"
                         + $" raised as stock raises it, by {Math.Max(0.0, gap) * 1000.0:F1} mm");

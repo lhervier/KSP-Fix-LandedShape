@@ -51,6 +51,16 @@ namespace com.github.lhervier.ksp.fix.landedshape
                     Log.Error("Could not skip the physics easing, a vessel whose shape is put back is still eased into " +
                         $"physics and may bounce: {e}");
                 }
+                try
+                {
+                    GroundPositioningForgetsShape.Install(harmony);
+                    Log.Info("Saved shape dropped when the game puts a vessel back onto the ground");
+                }
+                catch (Exception e)
+                {
+                    Log.Error("Could not watch the ground positioning, a vessel the game puts back onto the ground still " +
+                        $"gets its saved shape back: {e}");
+                }
             }
         }
     }
