@@ -32,11 +32,12 @@ vessel goes on rails (time warp, leaving the physics range).
 - When the vessel leaves the rails (`GameEvents.onVesselGoOffRails`), each part is put back in its saved pose, before
   the first physics step. The attach joints were created on the construction shape, so they get back the strain they
   had.
-- A prefix of `VesselPrecalculate.StartEasing` skips the physics easing of a vessel whose shape was just put back: it
-  starts with its full weight, which its joints are bent for.
 - A postfix of `ModuleWheelBase.wheelSetup` gives each suspension back its state as soon as the game builds the wheel.
-- The vessel is held still until the wheels that touched the ground when it was saved touch it again (25 physics
-  steps at most), then let go with the velocities its parts had.
+- The parts get the velocities they had as [Physics Easing Fix](https://github.com/lhervier/KSP-Fix-PhysicsEasing)
+  lets the vessel go: it gives the vessel its full weight at once, which its joints are bent for, and holds a vessel
+  on wheels still until they hold it. The module listens to its `onPhysicsEasingHold` and `onPhysicsEasingLetGo`
+  events, found by name (`GameEvents.FindEvent`), without depending on it. A vessel it does not hold gets its
+  velocities at the first physics step; without Physics Easing Fix, as soon as its shape is put back.
 - A prefix of `Vessel.CheckGroundCollision` drops the saved shape, velocities and suspension states of a vessel the
   game puts back onto the ground as it leaves the rails (a terrain detail changed since the save, for instance): it
   then leaves the rails as it does without the mod. See [Limits](../README.md#limits).

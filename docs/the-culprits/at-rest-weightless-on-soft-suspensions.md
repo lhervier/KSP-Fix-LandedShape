@@ -37,6 +37,10 @@ if (HighLogic.LoadedSceneIsFlight && baseSetup && !base.part.packed && wheel != 
     SuspensionSpringUpdate(vesselMass);
 ```
 
+This mod gives the parts back their velocities and the suspensions back their state. The weight eased in is left to
+[Physics Easing Fix](https://github.com/lhervier/KSP-Fix-PhysicsEasing), which gives a landed vessel its full weight
+at once and holds a vessel on wheels still until they hold it: see [the fixes](../the-fixes.md).
+
 [A small lander on Minmus](../examples/a-small-lander-on-minmus.md) shows it: no part of it has to be moved, and it
 still leaves the ground at every load and every time warp exit.
 

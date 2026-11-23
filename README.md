@@ -39,14 +39,19 @@ at a load, at the end of a time warp, when you come back within 200 m.
   with ore come back in the shape they were built with, not the one their weight bent them to, with parts inside the
   ground: they are pushed out of it, the modules on docking ports swing, the crane's wheels hit their stops.
 
-**This mod needs two others to make sense.** It brings a vessel back exactly where and how it was saved. That is
-only the right place if the ground under it is built where it was when the game was saved, and if its suspensions
-hold it as they did:
+**This mod needs others to make sense.** It brings a vessel back exactly where and how it was saved. That is only
+the right place if the ground under it is built where it was when the game was saved, if the vessel starts with the
+weight it was bent under, and if its suspensions hold it as they did:
 
 - [Terrain Precision Fix](https://github.com/lhervier/KSP-Fix-TerrainPrecision): without it, the ground is built
   again at a slightly different height at every load, and a vessel put back exactly at its saved place ends up
   in the ground or above it. Stock hides part of it by raising every landed vessel at load, the raise this mod
   removes: see [The culprits](#the-culprits).
+- [Physics Easing Fix](https://github.com/lhervier/KSP-Fix-PhysicsEasing): without it, the game takes the weight
+  off the vessel when physics starts and brings it back over a few physics steps. A vessel put back in the shape its
+  weight bent it to then relaxes while it is weightless, and bounces as its weight comes back. Physics Easing Fix
+  gives it its full weight at once, and holds a vessel on wheels or landing legs still until they hold it; this mod
+  gives the parts their velocities as it lets the vessel go.
 - [Suspension Bounce Fix](https://github.com/lhervier/KSP-Fix-SuspensionBounce): without it, the wheels and landing
   legs throw the vessel again on their own, whatever pose it is given back.
 
@@ -65,7 +70,7 @@ base is shaken and the modules swing for several seconds; with it, the base stay
 ### A small lander on Minmus
 
 A Mk1 pod on four landing legs, from a published save. Without this mod, it leaves the ground at every load and every
-time warp exit; saved once with the mod, it stands still, although no part of it has to be moved.
+time warp exit, although no part of it has to be moved: what it lacks is its suspensions and its weight as they were.
 
 **→ Full chapter: [A small lander on Minmus](docs/examples/a-small-lander-on-minmus.md)**
 
@@ -99,7 +104,9 @@ onto the ground by the lowest point of its straight shape at every time warp exi
 ### A vessel starts again at rest, weightless, and on suspensions of nothing
 
 When physics starts, every part of a landed vessel has no velocity, its weight comes back from nothing over 16 physics
-steps, and its suspensions are worked out again only once its wheels touch the ground.
+steps, and its suspensions are worked out again only once its wheels touch the ground. This mod gives back the
+velocities and the suspensions; the weight given back at once, and the vessel held until its wheels hold it, are the
+business of [Physics Easing Fix](https://github.com/lhervier/KSP-Fix-PhysicsEasing).
 
 **→ Full chapter: [A vessel starts again at rest, weightless, and on suspensions of nothing](docs/the-culprits/at-rest-weightless-on-soft-suspensions.md)**
 
@@ -110,9 +117,9 @@ Its switches are in [Settings](#settings), all on by default.
 - **`fixLandedLoad`: loaded where it was saved.** No raise at load, a vessel waiting on the runway or the launch pad
   left where it is; a guard puts a vessel back onto the ground only if its root is below the ground found under it.
 - **`keepLandedShape`: brought back in its shape and motion.** A vessel module saves the pose and velocity of each
-  part and the state of each wheel suspension, and gives them back when physics starts, with the vessel's full weight,
-  held still until its wheels touch the ground. It drops them when the game itself puts the vessel back onto the
-  ground.
+  part and the state of each wheel suspension, and gives them back when physics starts: the poses before the first
+  physics step, each suspension state as the game builds its wheel, the velocities as Physics Easing Fix lets the
+  vessel go. It drops them when the game itself puts the vessel back onto the ground.
 
 Removing the mod drops what it saved, and vessels load as they do without it.
 
@@ -153,6 +160,9 @@ Removing the mod drops what it saved, and vessels load as they do without it.
 What a player would see if this mod broke something, or what it should fix but was not checked yet, and how to try
 it by hand, with the mod and without:
 
+- **The lander of [Two examples](#two-examples), with Physics Easing Fix**: load its save, save again once it is at
+  rest, load that save, then time warp for a few seconds. With both mods, it should stand still at the load and at
+  the end of the time warp; without this mod, it jumps each time.
 - **A ground anchor or deployed science** near a vessel: it should stay where it was saved, with the mod as without.
 - **A vessel on a summit of the Mun**, saved and loaded five times: without the mod, it should drop at each load;
   with it, it should not move.
@@ -174,7 +184,8 @@ it by hand, with the mod and without:
 
 Copy the `GameData\KSPFixLandedShape` folder into the `GameData` folder of KSP. It needs
 [Harmony](https://github.com/KSPModdingLibs/HarmonyKSP), as KSP Community Fixes does. Install
-[Terrain Precision Fix](https://github.com/lhervier/KSP-Fix-TerrainPrecision) and
+[Terrain Precision Fix](https://github.com/lhervier/KSP-Fix-TerrainPrecision),
+[Physics Easing Fix](https://github.com/lhervier/KSP-Fix-PhysicsEasing) and
 [Suspension Bounce Fix](https://github.com/lhervier/KSP-Fix-SuspensionBounce) with it: see
 [Why it matters](#why-it-matters).
 
@@ -196,8 +207,10 @@ logLevel = Info
 - With `fixLandedLoad = False`, a landed vessel is raised and put back onto the ground as without the mod.
 - With `keepLandedShape = False`, a landed vessel loads straight, at rest, as without the mod; nothing is saved.
 - At `Info`, the mod writes a line each time it puts a vessel's shape back (`shape put back on N of N saved
-  part(s)`) and each time it lets it go (`let go after N physics step(s) held`). At `Debug`, it also writes one line
-  per landed vessel loaded, with the height stock would have raised it by, and one per part put back.
+  part(s)`), each time it drops one (`its saved shape is dropped`), and each time its guard puts a vessel back onto
+  the ground. The line `let go after N physics step(s) held` is written by Physics Easing Fix. At `Debug`, the mod
+  also writes one line per landed vessel loaded, with the height stock would have raised it by, one per part put
+  back, one per suspension given back its state, and one when the parts are given their velocities.
 
 ## Build
 

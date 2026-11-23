@@ -36,20 +36,18 @@ namespace com.github.lhervier.ksp.fix.landedshape
                 }
             }
 
-            // LandedShapeModule, a vessel module, reads its setting itself; only the easing it brings needs a patch.
+            // LandedShapeModule, a vessel module, reads its setting itself; the suspension states it gives back need a
+            // patch. KSP-Fix-PhysicsEasing skips the physics easing and holds the vessel until its wheels hold it.
             if (Settings.KeepLandedShape)
             {
                 try
                 {
-                    NoEasingAfterShape.Install(harmony);
-                    Log.Info("Physics easing skipped after a shape is put back");
                     WheelSetupPatch.Install(harmony);
                     Log.Info("Wheel suspensions given back their state after a shape is put back");
                 }
                 catch (Exception e)
                 {
-                    Log.Error("Could not skip the physics easing, a vessel whose shape is put back is still eased into " +
-                        $"physics and may bounce: {e}");
+                    Log.Error($"Could not give the wheel suspensions back their state, they start as stock starts them: {e}");
                 }
                 try
                 {

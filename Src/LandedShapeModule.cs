@@ -39,10 +39,10 @@ namespace com.github.lhervier.ksp.fix.landedshape
     /// had.
     ///
     /// KSP then eases the vessel into physics (VesselPrecalculate.StartEasing): its weight comes back over 16 steps,
-    /// from nothing. The joints put back under the strain of the full weight would relax meanwhile, and the vessel
-    /// would bounce when its weight comes back: that easing is skipped (<see cref="NoEasingAfterShape"/>). The wheel
-    /// suspensions get back the spring and damper they pushed with (<see cref="SuspensionState"/>), and the vessel is
-    /// held still until its wheels have found the ground (<see cref="Hold"/>).
+    /// from nothing, and the joints put back under the strain of the full weight would relax meanwhile. KSP-Fix-
+    /// PhysicsEasing skips that easing and holds a vessel on wheels still until they hold it; the parts get their
+    /// velocities as it lets the vessel go. The wheel suspensions get back the spring and damper they pushed with
+    /// (<see cref="SuspensionState"/>).
     ///
     /// The velocities saved are those of the motion the game shows, measured from the poses of the last physics steps
     /// (<see cref="SampleMotion"/>), not Rigidbody.velocity: PhysX moves a body with the velocity it has after its
@@ -67,30 +67,22 @@ namespace com.github.lhervier.ksp.fix.landedshape
         private Vector3 pendingRootVelocity;
         private Vector3 pendingRootAngularVelocity;
 
-        // How long after the shape is put back, in seconds of physics time, the easing it brings is skipped.
-        private const float EasingWindow = 1f;
-
-        /// <summary>When the shape was last put back (Time.fixedTime), or a negative value.</summary>
-        private float restoredAt = -1f;
-
         /// <summary>
         /// The suspension states put back with the shape, by part persistentId, waiting for the game to build their
         /// wheels; null when none waits.
         /// </summary>
         private Dictionary<uint, WheelState> pendingWheels;
 
-        // How many physics steps at most the vessel is held still for its wheels to find the ground.
-        private const int MaxHoldSteps = 25;
 
-        /// <summary>The bodies held kinematic since the shape was put back, until the wheels touch the ground; null when
-        /// none is held.</summary>
-        private List<Rigidbody> held;
+        /// <summary>
+        /// Whether KSP-Fix-PhysicsEasing holds the vessel still (between its onPhysicsEasingHold and
+        /// onPhysicsEasingLetGo events): the velocities of the shape put back wait for it to let the vessel go.
+        /// </summary>
+        private bool heldByPhysicsEasing;
 
-        /// <summary>The parts whose wheel touched the ground when the vessel was saved, and must touch it again before
-        /// the vessel is let go.</summary>
-        private List<Part> heldWheels;
-
-        private int heldSteps;
+        /// <summary>The events of KSP-Fix-PhysicsEasing, found by name; null without it.</summary>
+        private EventData<Vessel> physicsEasingHold;
+        private EventData<Vessel> physicsEasingLetGo;
 
         /// <summary>The shape being put back, kept until the vessel is let go, for its velocities.</summary>
         private Dictionary<uint, PartPose> moving;
@@ -122,17 +114,6 @@ namespace com.github.lhervier.ksp.fix.landedshape
         private int newestSample;
 
         /// <summary>
-        /// Whether the shape has just been put back, within <see cref="EasingWindow"/>; forgets it, so that only the
-        /// easing that follows the unpack is skipped.
-        /// </summary>
-        internal bool TakeJustRestored()
-        {
-            bool just = restoredAt >= 0f && Time.fixedTime - restoredAt < EasingWindow;
-            restoredAt = -1f;
-            return just;
-        }
-
-        /// <summary>
         /// Forgets the shape, velocities and suspension states waiting to be put back at the next unpack, so that the
         /// vessel leaves the rails as it does without the mod. Called when something moves the packed vessel onto the
         /// ground by its construction shape: the saved shape no longer matches where the vessel stands, and putting it
@@ -158,6 +139,28 @@ namespace com.github.lhervier.ksp.fix.landedshape
                 GameEvents.onVesselGoOffRails.Add(OnVesselGoOffRails);
                 GameEvents.onFloatingOriginShift.Add(OnFloatingOriginShift);
                 GameEvents.onVesselWasModified.Add(OnVesselWasModified);
+                physicsEasingHold = GameEvents.FindEvent<EventData<Vessel>>("onPhysicsEasingHold");
+                physicsEasingLetGo = GameEvents.FindEvent<EventData<Vessel>>("onPhysicsEasingLetGo");
+                physicsEasingHold?.Add(OnPhysicsEasingHold);
+                physicsEasingLetGo?.Add(OnPhysicsEasingLetGo);
+            }
+        }
+
+        private void OnPhysicsEasingHold(Vessel v)
+        {
+            if (v == vessel)
+            {
+                heldByPhysicsEasing = true;
+            }
+        }
+
+        // Let go by KSP-Fix-PhysicsEasing, at the start of a physics step: the parts get their saved velocities for it.
+        private void OnPhysicsEasingLetGo(Vessel v)
+        {
+            if (v == vessel)
+            {
+                heldByPhysicsEasing = false;
+                SetVelocities();
             }
         }
 
@@ -166,6 +169,8 @@ namespace com.github.lhervier.ksp.fix.landedshape
             GameEvents.onVesselGoOffRails.Remove(OnVesselGoOffRails);
             GameEvents.onFloatingOriginShift.Remove(OnFloatingOriginShift);
             GameEvents.onVesselWasModified.Remove(OnVesselWasModified);
+            physicsEasingHold?.Remove(OnPhysicsEasingHold);
+            physicsEasingLetGo?.Remove(OnPhysicsEasingLetGo);
         }
 
         // A shift moves every body between two samples: their motion is measured again from there.
@@ -208,9 +213,9 @@ namespace com.github.lhervier.ksp.fix.landedshape
             Vector3 rootAngularVelocity = pendingRootAngularVelocity;
             if (vessel != null && vessel.loaded && !vessel.packed)
             {
-                if (held != null && moving != null)
+                if (moving != null)
                 {
-                    // Held still since it was put back: the shape and velocities are still the ones loaded.
+                    // Still waiting to be let go since it was put back: the shape and velocities are still the ones loaded.
                     shape = moving;
                     rootVelocity = movingRootVelocity;
                     rootAngularVelocity = movingRootAngularVelocity;
@@ -231,11 +236,10 @@ namespace com.github.lhervier.ksp.fix.landedshape
 
         public override void OnGoOnRails()
         {
-            bool stillHeld = held != null && moving != null;
+            bool stillHeld = moving != null;
             Dictionary<uint, PartPose> loaded = moving;
             pendingWheels = null;
-            held = null;
-            heldWheels = null;
+            heldByPhysicsEasing = false;
             moving = null;
             // Called by Vessel.GoOnRails before the parts are packed: they are still where the physics left them.
             if (!Settings.KeepLandedShape || vessel == null || !vessel.loaded || vessel.packed)
@@ -245,7 +249,7 @@ namespace com.github.lhervier.ksp.fix.landedshape
             }
             if (stillHeld)
             {
-                // Held still since it was put back: the shape and velocities are still the ones loaded.
+                // Still waiting to be let go since it was put back: the shape and velocities are still the ones loaded.
                 pending = loaded;
                 pendingRootVelocity = movingRootVelocity;
                 pendingRootAngularVelocity = movingRootAngularVelocity;
@@ -381,12 +385,12 @@ namespace com.github.lhervier.ksp.fix.landedshape
 
         /// <summary>
         /// Records the pose of each physical body of the vessel, at each physics step, while it is loaded, unpacked,
-        /// landed and not held; forgets them otherwise.
+        /// landed, neither held by KSP-Fix-PhysicsEasing nor waiting for its velocities; forgets them otherwise.
         /// </summary>
         private void SampleMotion()
         {
             if (!Settings.KeepLandedShape || vessel == null || !vessel.loaded || vessel.packed || !vessel.Landed ||
-                held != null)
+                heldByPhysicsEasing || moving != null)
             {
                 if (tracks != null)
                 {
@@ -532,17 +536,15 @@ namespace com.github.lhervier.ksp.fix.landedshape
                         $"rest compression {pose.Wheel.UTarget:0.###}" : ""));
             }
             Physics.SyncTransforms();
-            restoredAt = Time.fixedTime;
             moving = shape;
             movingRootVelocity = pendingRootVelocity;
             movingRootAngularVelocity = pendingRootAngularVelocity;
             Log.Info($"{Name()}: shape put back on {restored} of {shape.Count} saved part(s), largest move " +
                 $"{maxMove * 1000f:0.0} mm on {maxPart}; {wheels} wheel suspension(s) waiting for their wheel");
-            if (wheels > 0)
-            {
-                Hold(shape);
-            }
-            else
+            // KSP-Fix-PhysicsEasing, when installed, holds a vessel on wheels still until they hold it: the velocities
+            // wait for it to let the vessel go (OnPhysicsEasingLetGo), or for the next physics step if it does not hold
+            // this one (FixedUpdate).
+            if (physicsEasingLetGo == null)
             {
                 SetVelocities();
             }
@@ -550,7 +552,7 @@ namespace com.github.lhervier.ksp.fix.landedshape
 
         /// <summary>
         /// Called once the game has built the wheel of <paramref name="part"/>: gives its suspension back the state
-        /// put back with the shape, and keeps its part held if the vessel is.
+        /// put back with the shape.
         /// </summary>
         internal void OnWheelBuilt(Part part)
         {
@@ -565,92 +567,22 @@ namespace com.github.lhervier.ksp.fix.landedshape
                 pendingWheels = null;
             }
             bool given = SuspensionState.Restore(part, state);
-            // Building the wheel makes its part's body dynamic again.
-            if (held != null && part.rb != null && !part.rb.isKinematic)
-            {
-                part.rb.isKinematic = true;
-                held.Add(part.rb);
-            }
             Log.Debug($"{Name()}: {part.partInfo.name} ({part.persistentId}) " +
                 (given ? $"suspension given back spring {state.USpring:0.#}, damper {state.UDamper:0.#}, rest " +
                     $"compression {state.UTarget:0.###}" : "suspension not found, left as the game sets it"));
         }
 
         /// <summary>
-        /// Holds every body of the vessel still (kinematic) in the shape put back, until each wheel of
-        /// <paramref name="shape"/> that touched the ground when the vessel was saved touches it again (see
-        /// <see cref="FixedUpdate"/>).
-        ///
-        /// A wheel finds the ground only after a physics step: until then, its suspension pushes on nothing, and its
-        /// part's joints, put back under the strain of the vessel's weight, throw it upwards; the structure bends by
-        /// centimetres in that step, and the ground pushes it back at the next one.
-        /// </summary>
-        private void Hold(Dictionary<uint, PartPose> shape)
-        {
-            held = new List<Rigidbody>();
-            heldWheels = new List<Part>();
-            heldSteps = 0;
-            foreach (Part p in vessel.parts)
-            {
-                if (p.rb != null && !p.rb.isKinematic)
-                {
-                    p.rb.isKinematic = true;
-                    held.Add(p.rb);
-                }
-                if (p.servoRb != null && !p.servoRb.isKinematic)
-                {
-                    p.servoRb.isKinematic = true;
-                    held.Add(p.servoRb);
-                }
-                PartPose pose;
-                if (shape.TryGetValue(p.persistentId, out pose) && pose.HasWheel && pose.Wheel.Grounded)
-                {
-                    heldWheels.Add(p);
-                }
-            }
-        }
-
-        /// <summary>
-        /// Samples the motion of the vessel (<see cref="SampleMotion"/>); lets the held vessel go, with its saved
-        /// velocities, once every wheel that touched the ground touches it again, or after <see cref="MaxHoldSteps"/>.
+        /// Samples the motion of the vessel (<see cref="SampleMotion"/>); gives the parts of a shape put back their
+        /// velocities once KSP-Fix-PhysicsEasing has had the chance to hold the vessel and has not.
         /// </summary>
         private void FixedUpdate()
         {
-            // Before letting go: the step that lets go is sampled from the next one on.
+            if (moving != null && !heldByPhysicsEasing)
+            {
+                SetVelocities();
+            }
             SampleMotion();
-            if (held == null)
-            {
-                return;
-            }
-            heldSteps++;
-            int grounded = 0;
-            foreach (Part p in heldWheels)
-            {
-                // A wheel not built yet, or whose state waits to be given back, is not ready; a part with no wheel
-                // module at all never will be.
-                ModuleWheelBase wheelBase = p != null ? p.FindModuleImplementing<ModuleWheelBase>() : null;
-                bool waiting = p != null && pendingWheels != null && pendingWheels.ContainsKey(p.persistentId);
-                if (wheelBase == null || (!waiting && wheelBase.Wheel != null && wheelBase.Wheel.IsGrounded))
-                {
-                    grounded++;
-                }
-            }
-            if (grounded < heldWheels.Count && heldSteps < MaxHoldSteps)
-            {
-                return;
-            }
-            foreach (Rigidbody rb in held)
-            {
-                if (rb != null)
-                {
-                    rb.isKinematic = false;
-                }
-            }
-            SetVelocities();
-            Log.Info($"{Name()}: let go after {heldSteps} physics step(s) held, {grounded} of {heldWheels.Count} wheel(s) " +
-                "on the ground");
-            held = null;
-            heldWheels = null;
         }
 
         /// <summary>
